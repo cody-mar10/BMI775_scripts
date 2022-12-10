@@ -220,6 +220,7 @@ def training_loop(
     weight_decay: float,
     dropout: float,
     filehandle: TextIO,
+    DEVICE: torch.device,
     **conv_kwargs,
 ) -> Tuple[List[float], List[float]]:
     val_loss_arr = list()
@@ -264,7 +265,7 @@ def training_loop(
                         float(l),
                     ]
                     for metric_name, metric in METRICS.items():
-                        score = evaluate(y_out, y_true, metric)
+                        score = evaluate(y_out, y_true, metric, DEVICE)
                         metrics[dcat].append(score)
 
                         if dcat == "val" and metric_name == "Accuracy":
@@ -323,6 +324,7 @@ def cross_validation_loop(
             weight_decay=weight_decay,
             dropout=dropout,
             filehandle=filehandle,
+            DEVICE=DEVICE,
             **conv_kwargs,
         )
         val_loss_mat.append(val_loss)

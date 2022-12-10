@@ -83,7 +83,10 @@ def predict(y_out: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
     return (torch.sigmoid(y_out) >= threshold).long()
 
 
-def evaluate(y_out: torch.Tensor, y_true: torch.Tensor, metric: Metric) -> float:
+def evaluate(
+    y_out: torch.Tensor, y_true: torch.Tensor, metrictype: Metric, device: torch.device
+) -> float:
     """Evaluate model performance with a provided score type"""
     y_pred = predict(y_out)
-    return float(metric()(y_true, y_pred))
+    metric = metrictype().to(device=device)
+    return float(metric(y_true, y_pred))
