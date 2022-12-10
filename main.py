@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import os
+from itertools import product
 from pathlib import Path
-from functools import partial
-from typing import Any, Dict, List, Tuple, Union, Iterator, TextIO
+from typing import Any, Dict, Iterator, List, TextIO, Tuple, Union
 
 import numpy as np
 import torch
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-)
 from torch import nn, optim
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import (
@@ -30,7 +24,7 @@ from torch_geometric.nn import (
 from torch_geometric.typing import EdgeType
 
 from models import CherryModel
-from training import evaluate, forward, precision_recall_auc, train
+from training import METRICS, evaluate, forward, train
 from utils import (
     CONV_NAME_PATT,
     SEED,
@@ -39,14 +33,13 @@ from utils import (
     num_params,
     reset_weights,
     train_validation_split,
-    wrapped_partial,
 )
 
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 PHYSICAL_THREADS = os.cpu_count() // 2  # assuming dual-threaded cores
-
+# TODO: remove a bunch of stuff into submodules
 CONV_LAYERS = {
     "GCN": GraphConv,
     "SAGE": SAGEConv,
@@ -59,14 +52,6 @@ CONV_LAYERS = {
 
 USES_ATTENTION = {GATv2Conv}
 DONT_ADD_SELF_LOOPS = {GATv2Conv}
-
-SCORERS = [
-    accuracy_score,
-    wrapped_partial(precision_score, zero_division=0.0),
-    wrapped_partial(recall_score, zero_division=0.0),
-    wrapped_partial(f1_score, zero_division=0.0),
-    precision_recall_auc,
-]
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,8 +85,9 @@ def parse_args() -> argparse.Namespace:
     model_hyperparam_args.add_argument(
         "-n",
         "--n-conv-layers",
+        nargs="+",
         type=int,
-        default=2,
+        default=[1, 2, 3, 4, 5],
         help="number of convolution layers all with same hidden dim (default: %(default)s)",
     )
     model_hyperparam_args.add_argument(
@@ -121,10 +107,11 @@ def parse_args() -> argparse.Namespace:
     )
     model_hyperparam_args.add_argument(
         "-c",
-        "--conv-layer",
+        "--conv-layers",
+        nargs="+",
         type=str,
         choices=CONV_LAYERS.keys(),
-        default="GCN",
+        default="all",
         help="type of convolution layers (default: %(default)s)",
     )
     model_hyperparam_args.add_argument(
@@ -276,11 +263,11 @@ def training_loop(
                         dcat,
                         float(l),
                     ]
-                    for scorer in SCORERS:
-                        score = evaluate(y_out, y_true, scorer)
+                    for metric_name, metric in METRICS.items():
+                        score = evaluate(y_out, y_true, metric)
                         metrics[dcat].append(score)
 
-                        if dcat == "val" and scorer == accuracy_score:
+                        if dcat == "val" and metric_name == "Accuracy":
                             val_acc_arr.append(score)
 
                     metrics_line = print_metrics(metrics[dcat])
@@ -360,7 +347,7 @@ def main(
     lr: float,
     weight_decay: float,
     n_epochs: int,
-    logfile: str,
+    logfile_handle: TextIO,
     log_epochs: int,
     using_tune: bool = True,
     **conv_kwargs,
@@ -371,32 +358,28 @@ def main(
     data = load_data(datafile).to(device=DEVICE)
     full_edge_type = ("virus", "infects", "host")
     criterion = nn.BCEWithLogitsLoss()
-    with open(logfile, "w") as fp:
-        header = "model\tfold\tepoch\tlayers\theads\tn_params\tlr\tweight_decay\tdropout\tdata\tloss\taccuracy\tprecision\trecall\tf1\tauprc"
-        print(header, flush=True, file=fp)
-        if any(issubclass(conv_layer, c) for c in DONT_ADD_SELF_LOOPS):
-            conv_kwargs["add_self_loops"] = False
-        splitter = train_validation_split(
-            data, kfolds, full_edge_type, random_state=SEED
-        )
-        loss, acc = cross_validation_loop(
-            kfolds_splitter=splitter,
-            gnn_hidden_dims=gnn_hidden_dims,
-            linear_hidden_dims=linear_hidden_dims,
-            conv_layer=conv_layer,
-            criterion=criterion,
-            full_edge_type=full_edge_type,
-            dropout=dropout,
-            lr=lr,
-            weight_decay=weight_decay,
-            n_epochs=n_epochs,
-            log_epochs=log_epochs,
-            filehandle=fp,
-            DEVICE=DEVICE,
-            **conv_kwargs,
-        )
-        if using_tune:
-            tune.report(loss=loss, accuracy=acc)
+    if any(issubclass(conv_layer, c) for c in DONT_ADD_SELF_LOOPS):
+        conv_kwargs["add_self_loops"] = False
+    splitter = train_validation_split(data, kfolds, full_edge_type, random_state=SEED)
+    loss, acc = cross_validation_loop(
+        kfolds_splitter=splitter,
+        gnn_hidden_dims=gnn_hidden_dims,
+        linear_hidden_dims=linear_hidden_dims,
+        conv_layer=conv_layer,
+        criterion=criterion,
+        full_edge_type=full_edge_type,
+        dropout=dropout,
+        lr=lr,
+        weight_decay=weight_decay,
+        n_epochs=n_epochs,
+        log_epochs=log_epochs,
+        filehandle=logfile_handle,
+        DEVICE=DEVICE,
+        **conv_kwargs,
+    )
+    if using_tune:
+        # TODO: report more frequently by placing this in the epochs training loop
+        tune.report(loss=loss, accuracy=acc)
 
 
 def main_helper(config: Dict[str, Any], checkpoint_dir=None) -> None:
@@ -416,6 +399,7 @@ def main_tune(
 ):
     torch.manual_seed(SEED)
     np.random.seed(SEED)
+    # TODO: can write a function that will choose n_conv_layers first to affect length of gnn_hidden_dim
     config = {
         "n_conv_layers": tune.choice([1, 2, 3, 4, 5]),
         "gnn_hidden_dim": tune.sample_from(lambda _: 2 ** np.random.randint(6, 9)),
@@ -470,26 +454,40 @@ if __name__ == "__main__":
             n_samples=args.n_trials,
         )
     else:
-        conv_kwargs = dict()
-        if args.attention_heads > 0:
-            conv_kwargs["heads"] = args.attention_heads
+        # conv_kwargs = dict()
+        # if args.attention_heads > 0:
+        #     conv_kwargs["heads"] = args.attention_heads
+
+        if args.conv_layers == "all":
+            conv_layers = list(CONV_LAYERS.values())
+        else:
+            conv_layers = [CONV_LAYERS[c] for c in args.conv_layers]
 
         torch.set_num_threads(threads)
+        with open(args.output, "w") as fp:
+            header = "model\tfold\tepoch\tlayers\theads\tn_params\tlr\tweight_decay\tdropout\tdata\tloss\taccuracy\tprecision\trecall\tf1\tauprc"
+            print(header, flush=True, file=fp)
+            for n_conv_layers, conv_layer in product(args.n_conv_layers, conv_layers):
+                conv_kwargs = dict()
+                if conv_layer in USES_ATTENTION:
+                    conv_kwargs["heads"] = args.attention_heads
 
-        main(
-            datafile=datafile,
-            kfolds=args.kfolds,
-            n_conv_layers=args.n_conv_layers,
-            gnn_hidden_dim=args.gnn_hidden_dim,
-            linear_hidden_dims=tuple(args.linear_hidden_dims),
-            conv_layer=CONV_LAYERS[args.conv_layer],
-            dropout=args.dropout,
-            lr=args.learning_rate,
-            weight_decay=args.weight_decay,
-            n_epochs=args.epochs,
-            logfile=args.output,
-            log_epochs=args.logging_rate,
-            using_tune=False,
-            **conv_kwargs,
-        )
+                # if conv_layer in DONT_ADD_SELF_LOOPS:
+                #     conv_kwargs["add_self_loops"] = False
+                main(
+                    datafile=datafile,
+                    kfolds=args.kfolds,
+                    n_conv_layers=n_conv_layers,
+                    gnn_hidden_dim=args.gnn_hidden_dim,
+                    linear_hidden_dims=tuple(args.linear_hidden_dims),
+                    conv_layer=conv_layer,
+                    dropout=args.dropout,
+                    lr=args.learning_rate,
+                    weight_decay=args.weight_decay,
+                    n_epochs=args.epochs,
+                    logfile_handle=fp,
+                    log_epochs=args.logging_rate,
+                    using_tune=False,
+                    **conv_kwargs,
+                )
 

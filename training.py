@@ -1,10 +1,25 @@
-from typing import Callable, Tuple
+from typing import Tuple
 
 import torch
-from sklearn.metrics import auc, precision_recall_curve
 from torch import nn, optim
 from torch_geometric.data import HeteroData
 from torch_geometric.typing import EdgeType
+from torchmetrics.classification import (
+    BinaryAccuracy,
+    BinaryAveragePrecision,
+    BinaryF1Score,
+    BinaryPrecision,
+    BinaryRecall,
+)
+from torchmetrics.metric import Metric
+
+METRICS = {
+    "Accuracy": BinaryAccuracy,
+    "Precision": BinaryPrecision,
+    "Recall": BinaryRecall,
+    "F1": BinaryF1Score,
+    "AUPRC": BinaryAveragePrecision,  # AUPRC
+}
 
 
 def forward(
@@ -68,14 +83,7 @@ def predict(y_out: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
     return (torch.sigmoid(y_out) >= threshold).long()
 
 
-def evaluate(y_out: torch.Tensor, y_true: torch.Tensor, scorer: Callable) -> float:
+def evaluate(y_out: torch.Tensor, y_true: torch.Tensor, metric: Metric) -> float:
     """Evaluate model performance with a provided score type"""
     y_pred = predict(y_out)
-    return scorer(y_true, y_pred)
-
-
-def precision_recall_auc(y_out: torch.Tensor, y_true: torch.Tensor) -> float:
-    y_pred_probas = torch.sigmoid(y_out)
-    precision, recall, _ = precision_recall_curve(y_true, y_pred_probas, pos_label=1)
-
-    return auc(recall, precision)
+    return float(metric()(y_true, y_pred))
