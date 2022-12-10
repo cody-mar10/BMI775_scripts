@@ -466,7 +466,13 @@ if __name__ == "__main__":
             conv_layers = [CONV_LAYERS[c] for c in args.conv_layers]
 
         torch.set_num_threads(threads)
-        with open(args.output, "w") as fp:
+
+        logbase = os.path.basename(args.logfile).rsplit(".")[0]
+
+        gh = args.gnn_hidden_dim
+        lh = args.linear_hidden_dims
+        logfile = f"{logbase}_gh-{gh}_lh-{','.join(map(str,lh))}.tsv"
+        with open(logfile, "w") as fp:
             header = "model\tfold\tepoch\tlayers\theads\tn_params\tlr\tweight_decay\tdropout\tdata\tloss\taccuracy\tprecision\trecall\tf1\tauprc"
             print(header, flush=True, file=fp)
             for n_conv_layers, conv_layer in product(args.n_conv_layers, conv_layers):
