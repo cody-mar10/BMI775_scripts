@@ -2,6 +2,7 @@
 import argparse
 import os
 from itertools import product
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, TextIO, Tuple, Union
 
@@ -221,10 +222,9 @@ def training_loop(
     dropout: float,
     filehandle: TextIO,
     DEVICE: torch.device,
+    using_tune: bool = True,
     **conv_kwargs,
-) -> Tuple[List[float], List[float]]:
-    val_loss_arr = list()
-    val_acc_arr = list()
+) -> None:
     for epoch in range(n_epochs):
         out, loss = train(train_data, model, optimizer, criterion, full_edge_type)
 
@@ -240,7 +240,7 @@ def training_loop(
             with torch.no_grad():
                 model.eval()
                 val_out, val_loss = forward(val_data, model, criterion, full_edge_type)
-                val_loss_arr.append(val_loss)
+                val_acc = 0.0
 
                 for dcat, l, y_out, y_true in zip(
                     ("train", "val"),
@@ -269,11 +269,14 @@ def training_loop(
                         metrics[dcat].append(score)
 
                         if dcat == "val" and metric_name == "Accuracy":
-                            val_acc_arr.append(score)
+                            val_acc = score
 
                     metrics_line = print_metrics(metrics[dcat])
                     print("\t".join(metrics_line), flush=True, file=filehandle)
-    return val_loss_arr, val_acc_arr
+
+            if using_tune:
+                # TODO: report more frequently by placing this in the epochs training loop
+                tune.report(loss=val_loss, accuracy=val_acc)
 
 
 def cross_validation_loop(
@@ -290,10 +293,9 @@ def cross_validation_loop(
     log_epochs: int,
     filehandle: TextIO,
     DEVICE: torch.device,
+    using_tune: bool = True,
     **conv_kwargs,
-) -> Tuple[float, float]:
-    val_loss_mat = list()
-    val_acc_mat = list()
+):
     for kfold, (train_data, val_data) in enumerate(kfolds_splitter):
         # TODO: technically don't need to transfer all attr
         train_data = train_data.to(device=DEVICE)
@@ -308,7 +310,7 @@ def cross_validation_loop(
         ).to(device=DEVICE)
         model.apply(reset_weights)
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-        val_loss, val_acc = training_loop(
+        training_loop(
             n_epochs=n_epochs,
             log_epochs=log_epochs,
             kfold=kfold,
@@ -325,17 +327,9 @@ def cross_validation_loop(
             dropout=dropout,
             filehandle=filehandle,
             DEVICE=DEVICE,
+            using_tune=using_tune,
             **conv_kwargs,
         )
-        val_loss_mat.append(val_loss)
-        val_acc_mat.append(val_acc)
-
-    val_loss_mat = torch.as_tensor(val_loss_mat).to(device=DEVICE)
-    val_acc_mat = torch.as_tensor(val_acc_mat).to(device=DEVICE)
-
-    avg_val_loss = val_loss_mat.mean(dim=0)
-    avg_val_acc = val_acc_mat.mean(dim=0)
-    return avg_val_loss.max(), avg_val_acc.max()
 
 
 def main(
@@ -349,7 +343,7 @@ def main(
     lr: float,
     weight_decay: float,
     n_epochs: int,
-    logfile_handle: TextIO,
+    logfile_handle: Union[str, TextIO],
     log_epochs: int,
     using_tune: bool = True,
     **conv_kwargs,
@@ -363,7 +357,9 @@ def main(
     if any(issubclass(conv_layer, c) for c in DONT_ADD_SELF_LOOPS):
         conv_kwargs["add_self_loops"] = False
     splitter = train_validation_split(data, kfolds, full_edge_type, random_state=SEED)
-    loss, acc = cross_validation_loop(
+
+    cx_val_loop = partial(
+        cross_validation_loop,
         kfolds_splitter=splitter,
         gnn_hidden_dims=gnn_hidden_dims,
         linear_hidden_dims=linear_hidden_dims,
@@ -375,13 +371,17 @@ def main(
         weight_decay=weight_decay,
         n_epochs=n_epochs,
         log_epochs=log_epochs,
-        filehandle=logfile_handle,
+        # filehandle=logfile_handle,
         DEVICE=DEVICE,
+        using_tune=using_tune,
         **conv_kwargs,
     )
-    if using_tune:
-        # TODO: report more frequently by placing this in the epochs training loop
-        tune.report(loss=loss, accuracy=acc)
+
+    if isinstance(logfile_handle, str):
+        with open(logfile_handle, "w") as fp:
+            cx_val_loop(filehandle=fp)
+    else:
+        cx_val_loop(filehandle=logfile_handle)
 
 
 def main_helper(config: Dict[str, Any], checkpoint_dir=None) -> None:
@@ -390,7 +390,7 @@ def main_helper(config: Dict[str, Any], checkpoint_dir=None) -> None:
 
 def main_tune(
     datafile: str,
-    max_epochs: int,
+    n_epochs: int,
     kfolds: int,
     logfile: str,
     log_epochs: int,
@@ -411,19 +411,22 @@ def main_tune(
         "conv_layer": tune.choice(list(CONV_LAYERS.values())),
         "dropout": tune.uniform(0.25, 0.5),
         "lr": tune.loguniform(1e-4, 1e-1),
-        "weight_decay": tune.loguniform(1e-4, 1e-1),
+        "weight_decay": tune.loguniform(1e-5, 1e-1),
         "kfolds": kfolds,
         "datafile": datafile,
-        "n_epochs": max_epochs,
+        "n_epochs": n_epochs,
         "log_epochs": log_epochs,
-        "logfile": logfile,
+        "logfile_handle": logfile,
     }
 
     if config["conv_layer"] in USES_ATTENTION:
         config["heads"] = tune.choice(range(1, 9))
 
+    # reporting every log_epochs out of n_epochs
+    # within kfolds cross-validation
+    max_epochs = kfolds * n_epochs // log_epochs
     scheduler = ASHAScheduler(
-        metric="loss", mode="min", max_t=max_epochs, grace_period=1, reduction_factor=2
+        metric="loss", mode="min", max_t=max_epochs, grace_period=1, reduction_factor=2,
     )
     reporter = ExperimentTerminationReporter(metric_columns=["loss", "accuracy"])
     results = tune.run(
@@ -442,13 +445,18 @@ if __name__ == "__main__":
 
     threads = min(PHYSICAL_THREADS, args.threads)
     datafile = Path(args.input).resolve().as_posix()
+    logbase = os.path.basename(args.output).rsplit(".")[0]
+    gh = args.gnn_hidden_dim
+    lh = args.linear_hidden_dims
+    heads = args.attention
+    logfile = f"{logbase}_heads-{heads}_gh-{gh}_lh-{','.join(map(str,lh))}.tsv"
 
     if args.tune_parameters:
         main_tune(
             datafile=datafile,
-            max_epochs=args.epochs,
+            n_epochs=args.epochs,
             kfolds=args.kfolds,
-            logfile=args.output,
+            logfile=logfile,
             log_epochs=args.logging_rate,
             threads=threads,
             gpus=args.gpus,
@@ -466,12 +474,6 @@ if __name__ == "__main__":
             conv_layers = [CONV_LAYERS[c] for c in args.conv_layers]
 
         torch.set_num_threads(threads)
-
-        logbase = os.path.basename(args.output).rsplit(".")[0]
-
-        gh = args.gnn_hidden_dim
-        lh = args.linear_hidden_dims
-        logfile = f"{logbase}_gh-{gh}_lh-{','.join(map(str,lh))}.tsv"
         with open(logfile, "w") as fp:
             header = "model\tfold\tepoch\tlayers\theads\tn_params\tlr\tweight_decay\tdropout\tdata\tloss\taccuracy\tprecision\trecall\tf1\tauprc"
             print(header, flush=True, file=fp)
