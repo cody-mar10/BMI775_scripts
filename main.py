@@ -448,7 +448,7 @@ if __name__ == "__main__":
     logbase = os.path.basename(args.output).rsplit(".")[0]
     gh = args.gnn_hidden_dim
     lh = args.linear_hidden_dims
-    heads = args.attention
+    heads = args.attention_heads
     logfile = f"{logbase}_heads-{heads}_gh-{gh}_lh-{','.join(map(str,lh))}.tsv"
 
     if args.tune_parameters:
