@@ -467,7 +467,7 @@ if __name__ == "__main__":
 
         torch.set_num_threads(threads)
 
-        logbase = os.path.basename(args.logfile).rsplit(".")[0]
+        logbase = os.path.basename(args.output).rsplit(".")[0]
 
         gh = args.gnn_hidden_dim
         lh = args.linear_hidden_dims
