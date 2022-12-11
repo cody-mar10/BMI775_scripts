@@ -330,11 +330,11 @@ def cross_validation_loop(
         val_loss_mat.append(val_loss)
         val_acc_mat.append(val_acc)
 
-    val_loss_mat = np.array(val_loss_mat)
-    val_acc_mat = np.array(val_acc_mat)
+    val_loss_mat = torch.as_tensor(val_loss_mat).to(device=DEVICE)
+    val_acc_mat = torch.as_tensor(val_acc_mat).to(device=DEVICE)
 
-    avg_val_loss = val_loss_mat.mean(axis=0)
-    avg_val_acc = val_acc_mat.mean(axis=0)
+    avg_val_loss = val_loss_mat.mean(dim=0)
+    avg_val_acc = val_acc_mat.mean(dim=0)
     return avg_val_loss.max(), avg_val_acc.max()
 
 
