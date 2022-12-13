@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     io_args = parser.add_argument_group("IO")
     io_args.add_argument(
-        "-i", "--input", help="required input pytorch geometric data file",
+        "-i", "--input", required=True, help="required input pytorch geometric data file",
     )
     io_args.add_argument(
         "-o",
@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         default="./model_eval",
         help="output directory for ray-tune testing (default: %(default)s)",
+    )
+    io_args.add_argument(
+        "-s",
+        "--save",
+        help="name to save model state dict",
     )
 
     model_hyperparam_args = parser.add_argument_group("MODEL HYPERPARAMETERS")
@@ -294,6 +299,7 @@ def cross_validation_loop(
     filehandle: TextIO,
     DEVICE: torch.device,
     using_tune: bool = True,
+    save=None,
     **conv_kwargs,
 ):
     for kfold, (train_data, val_data) in enumerate(kfolds_splitter):
@@ -330,6 +336,8 @@ def cross_validation_loop(
             using_tune=using_tune,
             **conv_kwargs,
         )
+    if save is not None:
+        torch.save(model.state_dict(), save)
 
 
 def main(
@@ -346,6 +354,7 @@ def main(
     logfile_handle: Union[str, TextIO],
     log_epochs: int,
     using_tune: bool = True,
+    save = None,
     **conv_kwargs,
 ) -> None:
     gnn_hidden_dims = tuple([gnn_hidden_dim] * n_conv_layers)
@@ -374,6 +383,7 @@ def main(
         # filehandle=logfile_handle,
         DEVICE=DEVICE,
         using_tune=using_tune,
+        save=save,
         **conv_kwargs,
     )
 
@@ -443,6 +453,7 @@ def main_tune(
 if __name__ == "__main__":
     args = parse_args()
 
+
     threads = min(PHYSICAL_THREADS, args.threads)
     datafile = Path(args.input).resolve().as_posix()
     logbase = os.path.basename(args.output).rsplit(".")[0]
@@ -498,6 +509,7 @@ if __name__ == "__main__":
                     logfile_handle=fp,
                     log_epochs=args.logging_rate,
                     using_tune=False,
+                    save=args.save,
                     **conv_kwargs,
                 )
 
